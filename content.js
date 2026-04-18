@@ -1,3 +1,12 @@
+/* ── Helpers ─────────────────────────────────────────────── */
+function escapeMd(text) {
+  return String(text).replace(/[\\`*_{}[\]()#+\-.!|]/g, '\\$&');
+}
+
+function sanitizeFilename(name) {
+  return String(name).replace(/[^a-z0-9\-_]/gi, '').trim().slice(0, 60) || 'page';
+}
+
 /* ── DOM → Markdown walker ───────────────────────────────── */
 const SKIP_TAGS = new Set(['script','style','noscript','nav','footer','header','aside','button','form','select','iframe','svg']);
 const BLOCK_TAGS = new Set(['p','div','section','article','main','blockquote','figure','figcaption','details','summary','li','dt','dd']);
@@ -14,14 +23,12 @@ function nodeToMd(node, ctx = { listDepth: 0 }) {
 
   const kids = (c = ctx) => Array.from(node.childNodes).map(n => nodeToMd(n, c)).join('');
 
-  // Headings
   if (/^h[1-6]$/.test(tag)) {
     const lvl = tag[1];
     const text = node.innerText.trim();
     return `\n${'#'.repeat(lvl)} ${text}\n`;
   }
 
-  // Code blocks
   if (tag === 'pre') {
     const code = node.querySelector('code');
     const lang = (code?.className || '').match(/language-(\w+)/)?.[1] || '';
@@ -33,7 +40,6 @@ function nodeToMd(node, ctx = { listDepth: 0 }) {
     return `\`${node.innerText.replace(/`/g, "'")}\``;
   }
 
-  // Inline formatting
   if (tag === 'strong' || tag === 'b') return `**${kids()}**`;
   if (tag === 'em'     || tag === 'i') return `*${kids()}*`;
   if (tag === 's'      || tag === 'del') return `~~${kids()}~~`;
@@ -41,29 +47,25 @@ function nodeToMd(node, ctx = { listDepth: 0 }) {
   if (tag === 'br')    return '  \n';
   if (tag === 'hr')    return '\n---\n';
 
-  // Links
   if (tag === 'a') {
     const href = node.href;
     const text = kids().trim();
     if (!text) return '';
-    if (!href || href.startsWith('javascript:') || href === window.location.href + '#') return text;
+    if (!href || href.startsWith('javascript:')) return text;
     return `[${text}](${href})`;
   }
 
-  // Images
   if (tag === 'img') {
     const src = node.src;
     if (!src || src.startsWith('data:')) return '';
     return `![${node.alt || ''}](${src})`;
   }
 
-  // Blockquote
   if (tag === 'blockquote') {
     const inner = kids().trim().split('\n').map(l => `> ${l}`).join('\n');
     return `\n${inner}\n`;
   }
 
-  // Lists
   if (tag === 'ul' || tag === 'ol') {
     const depth = ctx.listDepth;
     const indent = '  '.repeat(depth);
@@ -79,7 +81,6 @@ function nodeToMd(node, ctx = { listDepth: 0 }) {
   }
   if (tag === 'li') return kids(ctx);
 
-  // Tables
   if (tag === 'table') {
     const rows = Array.from(node.querySelectorAll('tr'));
     if (!rows.length) return '';
@@ -95,7 +96,6 @@ function nodeToMd(node, ctx = { listDepth: 0 }) {
   }
   if (tag === 'tr' || tag === 'th' || tag === 'td' || tag === 'thead' || tag === 'tbody') return kids();
 
-  // Block containers — just recurse, add spacing
   if (BLOCK_TAGS.has(tag)) return `\n${kids()}\n`;
 
   return kids();
@@ -109,17 +109,20 @@ function domToMarkdown(root) {
 
 /* ── Extraction ──────────────────────────────────────────── */
 function extractAndBuildMarkdown() {
-  const title = document.title || '';
+  const title = escapeMd(document.title || '');
   const url = window.location.href;
-  const description =
+  const description = escapeMd(
     document.querySelector('meta[name="description"]')?.content ||
-    document.querySelector('meta[property="og:description"]')?.content || '';
-  const author =
+    document.querySelector('meta[property="og:description"]')?.content || ''
+  );
+  const author = escapeMd(
     document.querySelector('meta[name="author"]')?.content ||
-    document.querySelector('meta[property="article:author"]')?.content || '';
-  const published =
+    document.querySelector('meta[property="article:author"]')?.content || ''
+  );
+  const published = escapeMd(
     document.querySelector('meta[property="article:published_time"]')?.content ||
-    document.querySelector('time[datetime]')?.getAttribute('datetime') || '';
+    document.querySelector('time[datetime]')?.getAttribute('datetime') || ''
+  );
 
   const root = document.querySelector('article,main,[role="main"]') || document.body;
   const body = domToMarkdown(root);
@@ -204,14 +207,28 @@ function showToast({ type = 'success', text, markdown, filename }) {
 
   const el = document.createElement('div');
   el.className = 'toast';
-  const icon = type === 'success' ? '✦' : '✕';
-  el.innerHTML = `<span class="icon">${icon}</span><span class="msg">${text}</span>`;
+
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'icon';
+  iconSpan.textContent = type === 'success' ? '✦' : '✕';
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'msg';
+  msgSpan.textContent = text;
+
+  el.appendChild(iconSpan);
+  el.appendChild(msgSpan);
 
   if (markdown) {
     const btn = document.createElement('button');
     btn.className = 'save-btn';
     btn.textContent = 'Save .md';
     btn.addEventListener('click', () => {
+      const MAX = 5 * 1024 * 1024;
+      if (markdown.length > MAX) {
+        showToast({ type: 'error', text: 'File too large to save.' });
+        return;
+      }
       chrome.runtime.sendMessage({ action: 'saveFile', markdown, filename });
       btn.textContent = 'Saving…';
       btn.disabled = true;
@@ -232,27 +249,27 @@ function showToast({ type = 'success', text, markdown, filename }) {
 if (!window.__p2mdListening) {
   window.__p2mdListening = true;
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // Only accept messages from our own extension's background service worker
+    if (sender.tab !== undefined) return false;
+
     if (msg.action === 'extractAndCopy') {
       try {
         const markdown = extractAndBuildMarkdown();
-        const filename = (document.title || 'page')
-          .replace(/[^a-z0-9\s-]/gi, '').trim().replace(/\s+/g, '-').toLowerCase().slice(0, 60) || 'page';
+        const filename = sanitizeFilename(
+          (document.title || 'page').replace(/\s+/g, '-').toLowerCase()
+        ) + '.md';
 
-        try {
-          const ta = document.createElement('textarea');
-          ta.value = markdown;
-          ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;width:1px;height:1px;';
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-          showToast({ type: 'success', text: 'Copied as Markdown', markdown, filename: `${filename}.md` });
-          sendResponse({ ok: true });
-        } catch (e) {
-          sendResponse({ error: e.message });
-        }
+        const ta = document.createElement('textarea');
+        ta.value = markdown;
+        ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;width:1px;height:1px;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast({ type: 'success', text: 'Copied as Markdown', markdown, filename });
+        sendResponse({ ok: true });
       } catch (e) {
         sendResponse({ error: e.message });
       }
@@ -260,7 +277,7 @@ if (!window.__p2mdListening) {
     }
 
     if (msg.action === 'showToast') {
-      showToast({ type: msg.type, text: msg.text });
+      showToast({ type: msg.type, text: String(msg.text).slice(0, 200) });
       sendResponse({ ok: true });
     }
     return true;

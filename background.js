@@ -24,9 +24,20 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.action === 'saveFile' && sender.tab?.id) {
+  // Only accept messages from content scripts in real tabs
+  if (!sender.tab?.id || sender.frameId !== 0) return false;
+
+  if (msg.action === 'saveFile') {
+    const MAX = 5 * 1024 * 1024;
+    if (!msg.markdown || msg.markdown.length > MAX) {
+      sendResponse({ error: 'Invalid or oversized content' });
+      return;
+    }
+    const filename = String(msg.filename || 'page.md')
+      .replace(/[^a-z0-9\-_.]/gi, '').slice(0, 64) || 'page.md';
+
     const dataUrl = 'data:text/markdown;charset=utf-8,' + encodeURIComponent(msg.markdown);
-    chrome.downloads.download({ url: dataUrl, filename: msg.filename, saveAs: true }, (id) => {
+    chrome.downloads.download({ url: dataUrl, filename, saveAs: true }, (id) => {
       const ok = id !== undefined && !chrome.runtime.lastError;
       chrome.tabs.sendMessage(sender.tab.id, {
         action: 'showToast',
